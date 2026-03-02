@@ -1,0 +1,50 @@
+import amqplib from 'amqplib';
+import type { Connection, Channel } from 'amqplib';
+import { env } from '../config/env.js';
+import { logger } from '../observability/logger.js';
+
+let connection: Connection;
+let channel: Channel;
+
+export async function connectRabbitMQ(url?: string): Promise<{ connection: Connection; channel: Channel }> {
+  const rabbitUrl = url ?? env.RABBITMQ_URL;
+
+  logger.info({ url: rabbitUrl.replace(/\/\/.*@/, '//***@') }, 'Connecting to RabbitMQ');
+
+  connection = await amqplib.connect(rabbitUrl);
+  channel = await connection.createChannel();
+
+  await channel.assertExchange(env.EXCHANGE_NAME, 'topic', { durable: true });
+
+  await channel.assertQueue(env.QUEUE_NAME, {
+    durable: true,
+    arguments: {
+      'x-dead-letter-exchange': `${env.EXCHANGE_NAME}.dlx`,
+      'x-dead-letter-routing-key': `dlq.${env.QUEUE_NAME}`,
+    },
+  });
+
+  await channel.bindQueue(env.QUEUE_NAME, env.EXCHANGE_NAME, 'route.pix');
+
+  logger.info({ queue: env.QUEUE_NAME, exchange: env.EXCHANGE_NAME }, 'RabbitMQ connected');
+
+  connection.on('error', (err) => {
+    logger.error({ err }, 'RabbitMQ connection error');
+  });
+
+  connection.on('close', () => {
+    logger.warn('RabbitMQ connection closed');
+  });
+
+  return { connection, channel };
+}
+
+export function getChannel(): Channel {
+  if (!channel) throw new Error('RabbitMQ channel not initialized');
+  return channel;
+}
+
+export function getConnection(): Connection {
+  if (!connection) throw new Error('RabbitMQ connection not initialized');
+  return connection;
+}
