@@ -1,12 +1,12 @@
 import amqplib from 'amqplib';
-import type { Connection, Channel } from 'amqplib';
-import { env } from '../config/env.js';
+import type { ChannelModel, Channel } from 'amqplib';
+import { env } from '../config/env';
 import { logger } from '../observability/logger.js';
 
-let connection: Connection;
+let connection: ChannelModel;
 let channel: Channel;
 
-export async function connectRabbitMQ(url?: string): Promise<{ connection: Connection; channel: Channel }> {
+export async function connectRabbitMQ(url?: string): Promise<{ connection: ChannelModel; channel: Channel }> {
   const rabbitUrl = url ?? env.RABBITMQ_URL;
 
   logger.info({ url: rabbitUrl.replace(/\/\/.*@/, '//***@') }, 'Connecting to RabbitMQ');
@@ -19,8 +19,8 @@ export async function connectRabbitMQ(url?: string): Promise<{ connection: Conne
   await channel.assertQueue(env.QUEUE_NAME, {
     durable: true,
     arguments: {
-      'x-dead-letter-exchange': `${env.EXCHANGE_NAME}.dlx`,
-      'x-dead-letter-routing-key': `dlq.${env.QUEUE_NAME}`,
+      'x-dead-letter-exchange': 'mipit.dlx',
+      'x-dead-letter-routing-key': `dlq.pix`,
     },
   });
 
@@ -44,7 +44,7 @@ export function getChannel(): Channel {
   return channel;
 }
 
-export function getConnection(): Connection {
+export function getConnection(): ChannelModel {
   if (!connection) throw new Error('RabbitMQ connection not initialized');
   return connection;
 }
