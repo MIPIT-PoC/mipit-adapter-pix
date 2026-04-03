@@ -4,14 +4,17 @@ const sdk = initTelemetry();
 import { connectRabbitMQ } from './messaging/rabbitmq.js';
 import { startWorker } from './worker.js';
 import { startMockServer } from './pix/mock-server.js';
+import { startHealthServer } from './health-server.js';
 import { env } from './config/env.js';
 import { logger } from './observability/logger.js';
 
 async function main() {
   if (env.PIX_MODE === 'mock') {
-    startMockServer();
+    await startMockServer();
     logger.info('PIX mock sandbox started');
   }
+
+  await startHealthServer(env.HEALTH_PORT);
 
   const { channel } = await connectRabbitMQ(env.RABBITMQ_URL);
   await startWorker(channel);

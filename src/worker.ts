@@ -4,9 +4,11 @@ import { ADAPTER_ID, RAIL } from './config/constants.js';
 import { canonicalToPixPayload } from './pix/mapper.js';
 import { pixResponseToAck } from './pix/response-mapper.js';
 import { sendPixPayment } from './pix/client.js';
+import { publishAck } from './messaging/publisher.js';
 import { logger } from './observability/logger.js';
+import { pixPaymentsTotal, pixPaymentLatency } from './observability/metrics.js';
 
-interface PaymentRouteMessage {
+export interface PaymentRouteMessage {
   payment_id: string;
   trace_id: string;
   canonical: Record<string, unknown>;
@@ -15,7 +17,7 @@ interface PaymentRouteMessage {
   routed_at: string;
 }
 
-interface PaymentAckMessage {
+export interface PaymentAckMessage {
   payment_id: string;
   trace_id: string;
   source_rail: string;
@@ -72,12 +74,10 @@ export async function startWorker(channel: Channel) {
         processed_at: new Date().toISOString(),
       };
 
-      channel.publish(
-        env.EXCHANGE_NAME,
-        env.ACK_ROUTING_KEY,
-        Buffer.from(JSON.stringify(ackMessage)),
-        { persistent: true },
-      );
+      publishAck(channel, ackMessage as unknown as Record<string, unknown>);
+
+      pixPaymentsTotal.inc({ status: railAck.status === 'ACCEPTED' ? 'success' : 'rejected' });
+      pixPaymentLatency.observe({ status: 'success' }, latencyMs);
 
       logger.info({
         payment_id: routeMsg.payment_id,
@@ -105,12 +105,10 @@ export async function startWorker(channel: Channel) {
         processed_at: new Date().toISOString(),
       };
 
-      channel.publish(
-        env.EXCHANGE_NAME,
-        env.ACK_ROUTING_KEY,
-        Buffer.from(JSON.stringify(failAck)),
-        { persistent: true },
-      );
+      publishAck(channel, failAck as unknown as Record<string, unknown>);
+
+      pixPaymentsTotal.inc({ status: 'error' });
+      pixPaymentLatency.observe({ status: 'error' }, latencyMs);
 
       channel.nack(msg, false, false);
     }

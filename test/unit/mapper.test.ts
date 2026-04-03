@@ -64,4 +64,74 @@ describe('canonicalToPixPayload', () => {
     expect(result.finalidade).toHaveLength(35);
     expect(result.mensagem).toHaveLength(140);
   });
+
+  it('should strip PIX- prefix from debtor and creditor accounts', () => {
+    const canonical = {
+      payment_id: 'PAY-004',
+      amount: { value: 200, currency: 'BRL' },
+      debtor: { account_id: 'PIX-sender-key-123', name: 'Sender' },
+      creditor: { account_id: 'PIX-receiver-key-456', name: 'Receiver' },
+      alias: { type: 'PIX_KEY', value: 'receiver-key-456' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.chaveOrigem).toBe('sender-key-123');
+    expect(result.chaveDestino).toBe('receiver-key-456');
+  });
+
+  it('should handle missing optional fields gracefully', () => {
+    const canonical = {
+      payment_id: 'PAY-005',
+      amount: { value: 50, currency: 'BRL' },
+      debtor: { account_id: 'sender' },
+      creditor: { account_id: 'receiver' },
+      alias: { type: 'PIX_KEY', value: 'receiver' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.nomePagador).toBeUndefined();
+    expect(result.nomeRecebedor).toBeUndefined();
+    expect(result.finalidade).toBeUndefined();
+    expect(result.mensagem).toBeUndefined();
+    expect(result.trace).toBeUndefined();
+  });
+
+  it('should round FX amount to 2 decimal places', () => {
+    const canonical = {
+      payment_id: 'PAY-006',
+      amount: { value: 33.33, currency: 'USD' },
+      fx: { rate: 5.123 },
+      debtor: { account_id: 'sender' },
+      creditor: { account_id: 'receiver' },
+      alias: { type: 'PIX_KEY', value: 'receiver' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.valor).toBe(Math.round(33.33 * 5.123 * 100) / 100);
+  });
+
+  it('should always set moeda to BRL', () => {
+    const canonical = {
+      payment_id: 'PAY-007',
+      amount: { value: 100, currency: 'USD' },
+      debtor: { account_id: 'sender' },
+      creditor: { account_id: 'receiver' },
+      alias: { type: 'PIX_KEY', value: 'receiver' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.moeda).toBe('BRL');
+  });
 });

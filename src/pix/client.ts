@@ -1,16 +1,17 @@
 import { env } from '../config/env.js';
 import { withRetry } from './retry.js';
-import type { PixPaymentRequest, PixPaymentResponse } from './types.js';
+import type { PixSpiPaymentRequest, PixSpiPaymentResponse } from './types.js';
 import { logger } from '../observability/logger.js';
 
-export async function sendPixPayment(payload: PixPaymentRequest): Promise<PixPaymentResponse> {
+export async function sendPixPayment(payload: PixSpiPaymentRequest): Promise<PixSpiPaymentResponse> {
   return withRetry(async () => {
-    const url = `${env.PIX_SANDBOX_URL}/pix/payments`;
+    // Try real SPI endpoint; mock server handles /spi/v2/pagamentos and /pix/payments
+    const url = `${env.PIX_SANDBOX_URL}/spi/v2/pagamentos`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), env.PIX_TIMEOUT_MS);
 
     try {
-      logger.debug({ url, pix_tx_ref: payload.pix_tx_ref }, 'Sending PIX payment');
+      logger.debug({ url, endToEndId: payload.endToEndId }, 'Sending PIX SPI payment');
 
       const res = await fetch(url, {
         method: 'POST',
@@ -24,7 +25,7 @@ export async function sendPixPayment(payload: PixPaymentRequest): Promise<PixPay
         throw new Error(`PIX sandbox error: ${res.status} — ${body}`);
       }
 
-      return (await res.json()) as PixPaymentResponse;
+      return (await res.json()) as PixSpiPaymentResponse;
     } finally {
       clearTimeout(timeout);
     }
