@@ -30,6 +30,14 @@ import { PIX_ISPB } from './types.js';
 const app = express();
 app.use(express.json());
 
+/**
+ * PoC mode: when MOCK_ENFORCE_HOURS=false (default in PoC), operating window
+ * and nocturnal limit checks are bypassed so tests are deterministic regardless
+ * of the time of day. Set MOCK_ENFORCE_HOURS=true to simulate real BACEN SPI
+ * operating constraints.
+ */
+const ENFORCE_HOURS = (process.env.MOCK_ENFORCE_HOURS ?? 'false') === 'true';
+
 /** In-memory idempotency store: endToEndId → settled response */
 const processedPayments = new Map<string, PixSpiPaymentResponse>();
 
@@ -150,7 +158,7 @@ app.post('/spi/v2/pagamentos', (req, res) => {
   }
 
   // === Validation: SPI operating window (AB03) ===
-  if (!isSpiWindowOpen()) {
+  if (ENFORCE_HOURS && !isSpiWindowOpen()) {
     const r = buildRejectedResponse(endToEndId, valor.original, 'AB03',
       'Janela de liquidação do SPI fechada. O SPI opera de segunda a sexta das 07:00 às 23:59 BRT e sábados das 07:00 às 18:00 BRT.');
     processedPayments.set(endToEndId, r);
@@ -158,7 +166,7 @@ app.post('/spi/v2/pagamentos', (req, res) => {
   }
 
   // === Validation: PIX Noturno limit (BRL 1,000) ===
-  if (isPixNocturnalWindow() && amountValue > 1_000) {
+  if (ENFORCE_HOURS && isPixNocturnalWindow() && amountValue > 1_000) {
     const r = buildRejectedResponse(endToEndId, valor.original, 'AM04',
       `Valor R$ ${amountValue.toFixed(2)} excede o limite noturno do PIX (R$ 1.000,00) entre 20:00–06:59 BRT.`);
     processedPayments.set(endToEndId, r);
