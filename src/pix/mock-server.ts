@@ -26,20 +26,32 @@ import { env } from '../config/env.js';
 import { logger } from '../observability/logger.js';
 import type { PixSpiPaymentRequest, PixSpiPaymentResponse } from './types.js';
 import { PIX_ISPB } from './types.js';
+import { registerOAuth2Routes, oauthMiddleware } from './oauth-mock.js';
+import { registerAdminRoutes, mockConfig, mockStats } from './admin-routes.js';
 
 const app = express();
+app.use((_req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (_req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.use(express.json());
 
-/**
- * PoC mode: when MOCK_ENFORCE_HOURS=false (default in PoC), operating window
- * and nocturnal limit checks are bypassed so tests are deterministic regardless
- * of the time of day. Set MOCK_ENFORCE_HOURS=true to simulate real BACEN SPI
- * operating constraints.
- */
+// OAuth2 endpoints (must be registered before middleware)
+registerOAuth2Routes(app);
+
+// OAuth2 bearer token validation (skips /health, /oauth, /admin)
+app.use(oauthMiddleware);
+
 const ENFORCE_HOURS = (process.env.MOCK_ENFORCE_HOURS ?? 'false') === 'true';
 
 /** In-memory idempotency store: endToEndId → settled response */
 const processedPayments = new Map<string, PixSpiPaymentResponse>();
+
+// Admin control routes
+registerAdminRoutes(app, processedPayments);
 
 /** DICT chave format validators */
 const CHAVE_VALIDATORS: Record<string, RegExp> = {
@@ -173,47 +185,80 @@ app.post('/spi/v2/pagamentos', (req, res) => {
     return res.status(200).json(r);
   }
 
+  // Track stats
+  mockStats.totalReceived++;
+  mockStats.lastPaymentAt = new Date().toISOString();
+
+  // === Admin: mock disabled (service unavailable) ===
+  if (!mockConfig.enabled) {
+    return res.status(503).json({
+      title: 'Serviço indisponível.',
+      detail: 'O SPI está temporariamente indisponível para manutenção.',
+    });
+  }
+
+  // === Admin: force reject next ===
+  if (mockConfig.forceRejectNext) {
+    mockConfig.forceRejectNext = false;
+    mockStats.totalRejected++;
+    const r = buildRejectedResponse(endToEndId, valor.original, mockConfig.forceRejectCode,
+      `[ADMIN] Rejeição forçada pelo simulador (código: ${mockConfig.forceRejectCode}).`);
+    processedPayments.set(endToEndId, r);
+    return res.status(200).json(r);
+  }
+
+  // === Admin: force timeout next ===
+  if (mockConfig.forceTimeoutNext) {
+    mockConfig.forceTimeoutNext = false;
+    mockStats.totalTimeout++;
+    logger.info({ endToEndId }, 'PIX mock: forcing 30s timeout (admin)');
+    setTimeout(() => {
+      res.status(504).json({ title: 'Gateway Timeout', detail: 'SPI não respondeu dentro do prazo.' });
+    }, 30_000);
+    return;
+  }
+
   // === Simulate realistic BACEN SPI rejection scenarios ===
   const failRoll = Math.random();
 
-  if (failRoll < 0.04) {
+  if (failRoll < mockConfig.rejectionRate * 0.4) {
     // 4% — Insufficient funds (AM04)
     const r = buildRejectedResponse(endToEndId, valor.original, 'AM04',
       'Saldo insuficiente. O pagador não possui fundos suficientes para realizar a transferência.');
     processedPayments.set(endToEndId, r);
     return res.status(200).json(r);
   }
-  if (failRoll < 0.06) {
-    // 2% — Incorrect account number (AC01)
+  if (failRoll < mockConfig.rejectionRate * 0.6) {
+    mockStats.totalRejected++;
     const r = buildRejectedResponse(endToEndId, valor.original, 'AC01',
       'Número de conta do recebedor incorreto ou não encontrado no PSP de destino.');
     processedPayments.set(endToEndId, r);
     return res.status(200).json(r);
   }
-  if (failRoll < 0.08) {
-    // 2% — Regulatory reason (RR04)
+  if (failRoll < mockConfig.rejectionRate * 0.8) {
+    mockStats.totalRejected++;
     const r = buildRejectedResponse(endToEndId, valor.original, 'RR04',
       'Transferência não autorizada por razão regulatória. Limite diário da conta de origem atingido.');
     processedPayments.set(endToEndId, r);
     return res.status(200).json(r);
   }
-  if (failRoll < 0.09) {
-    // 1% — Inconsistent with end customer (BE01)
+  if (failRoll < mockConfig.rejectionRate * 0.9) {
+    mockStats.totalRejected++;
     const r = buildRejectedResponse(endToEndId, valor.original, 'BE01',
       'Dados do recebedor inconsistentes com a chave PIX registrada no DICT.');
     processedPayments.set(endToEndId, r);
     return res.status(200).json(r);
   }
-  if (failRoll < 0.10) {
-    // 1% — Order rejected by receiving PSP (DS04)
+  if (failRoll < mockConfig.rejectionRate) {
+    mockStats.totalRejected++;
     const r = buildRejectedResponse(endToEndId, valor.original, 'DS04',
       'Ordem de pagamento rejeitada pelo PSP do recebedor.');
     processedPayments.set(endToEndId, r);
     return res.status(200).json(r);
   }
 
-  // === Success: simulate SPI settlement latency (80–450ms) ===
-  const latency = 80 + Math.random() * 370;
+  // === Success: simulate SPI settlement latency (configurable) ===
+  const latency = mockConfig.minLatencyMs + Math.random() * (mockConfig.maxLatencyMs - mockConfig.minLatencyMs);
   setTimeout(() => {
     const spiTxId = ulid().toLowerCase();
     const now = new Date().toISOString();
@@ -245,6 +290,7 @@ app.post('/spi/v2/pagamentos', (req, res) => {
     };
 
     processedPayments.set(endToEndId, response);
+    mockStats.totalAccepted++;
 
     logger.info({
       endToEndId,

@@ -74,7 +74,7 @@ export async function startWorker(channel: Channel) {
         processed_at: new Date().toISOString(),
       };
 
-      publishAck(channel, ackMessage as unknown as Record<string, unknown>);
+      publishAck(channel, ackMessage);
 
       pixPaymentsTotal.inc({ status: railAck.status === 'ACCEPTED' ? 'success' : 'rejected' });
       pixPaymentLatency.observe({ status: 'success' }, latencyMs);
@@ -105,7 +105,7 @@ export async function startWorker(channel: Channel) {
         processed_at: new Date().toISOString(),
       };
 
-      publishAck(channel, failAck as unknown as Record<string, unknown>);
+      publishAck(channel, failAck);
 
       pixPaymentsTotal.inc({ status: 'error' });
       pixPaymentLatency.observe({ status: 'error' }, latencyMs);
