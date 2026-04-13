@@ -16,11 +16,13 @@ describe('generatePixEndToEndId', () => {
   it('should include YYYYMMDD date at positions 9-16', () => {
     const before = new Date();
     const id = generatePixEndToEndId('60746948');
-    const year = before.getFullYear().toString();
     const dateStr = id.substring(9, 17);
-    // Starts with current year
-    expect(dateStr.startsWith(year.slice(2))).toBe(true);
+    // Should be 8 digits (YYYYMMDD format)
+    expect(/^\d{8}$/.test(dateStr)).toBe(true);
     expect(dateStr.length).toBe(8);
+    // Year portion should match current year (first 4 chars)
+    const yearStr = dateStr.substring(0, 4);
+    expect(parseInt(yearStr)).toBe(before.getFullYear());
   });
 
   it('should include HHmm at positions 17-20', () => {

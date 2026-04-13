@@ -1,137 +1,218 @@
 import { canonicalToPixPayload } from '../../src/pix/mapper';
+import { PIX_ISPB } from '../../src/pix/types.js';
 
 describe('canonicalToPixPayload', () => {
-  it('should map canonical payment to PIX payload', () => {
+  it('should map canonical payment to PIX SPI payload with FX conversion', () => {
     const canonical = {
-      payment_id: 'PAY-001',
+      payment_id: 'PMT-001',
       amount: { value: 1000, currency: 'USD' },
       fx: { rate: 5.2 },
-      debtor: { account_id: 'PIX-chave-origem-123', name: 'João Silva' },
-      creditor: { account_id: 'PIX-chave-destino-456', name: 'Maria Santos' },
-      alias: { type: 'PIX_KEY', value: 'chave-destino-456' },
-      purpose: 'Pagamento de serviços',
+      debtor: { account_id: 'PIX-11122233344', name: 'João Silva', agencia: '0001' },
+      creditor: { account_id: 'PIX-55566677788', name: 'Maria Santos' },
+      alias: { type: 'CPF', value: '55566677788' },
       reference: 'REF-12345',
-      origin: { rail: 'PIX' },
-      destination: { rail: 'PIX' },
-      trace_id: 'trace-001',
+      origin: { rail: 'PIX', ispb: PIX_ISPB.MIPIT_SIMULATED },
+      destination: { rail: 'PIX', ispb: PIX_ISPB.MIPIT_SIMULATED },
     };
 
     const result = canonicalToPixPayload(canonical);
 
-    expect(result.pix_tx_ref).toBe('PAY-001');
-    expect(result.valor).toBe(5200);
-    expect(result.moeda).toBe('BRL');
-    expect(result.chaveOrigem).toBe('chave-origem-123');
-    expect(result.chaveDestino).toBe('chave-destino-456');
-    expect(result.nomePagador).toBe('João Silva');
-    expect(result.nomeRecebedor).toBe('Maria Santos');
-    expect(result.tipoChave).toBe('PIX_KEY');
-    expect(result.trace).toBe('trace-001');
+    // Validate SPI EndToEndId format: E + ISPB(8) + YYYYMMDD(8) + HHmm(4) + unique(11) = 32 chars total
+    // Format: E (1) + digits (20) + alphanumeric (11) = 32 chars
+    expect(result.endToEndId).toMatch(/^E\d{20}[A-Z0-9]{11}$/);
+    // Validate amount conversion: 1000 USD * 5.2 rate = 5200.00 BRL
+    expect(result.valor.original).toBe('5200.00');
+    // Validate reconciliation ID (strip PMT- prefix, max 35 chars)
+    expect(result.idConciliacao).toBe('001');
+    // Validate payer structure
+    expect(result.pagador.nome).toBe('João Silva');
+    expect(result.pagador.ispb).toBe(PIX_ISPB.MIPIT_SIMULATED);
+    expect(result.pagador.agencia).toBe('0001');
+    // Validate receiver structure
+    expect(result.recebedor.nome).toBe('Maria Santos');
+    expect(result.recebedor.ispb).toBe(PIX_ISPB.MIPIT_SIMULATED);
+    // Validate PIX key
+    expect(result.chave).toBe('55566677788');
+    expect(result.tipoChave).toBe('CPF');
+    expect(result.tipo).toBe('TRANSF');
   });
 
   it('should default fx rate to 1 when not provided', () => {
     const canonical = {
-      payment_id: 'PAY-002',
+      payment_id: 'PMT-002',
       amount: { value: 500, currency: 'BRL' },
-      debtor: { account_id: 'chave-origem' },
-      creditor: { account_id: 'chave-destino' },
-      alias: { type: 'PIX_KEY', value: 'chave-destino' },
-      origin: { rail: 'PIX' },
-      destination: {},
-    };
-
-    const result = canonicalToPixPayload(canonical);
-
-    expect(result.valor).toBe(500);
-    expect(result.destino).toBe('PIX');
-  });
-
-  it('should truncate purpose to 35 chars and reference to 140 chars', () => {
-    const canonical = {
-      payment_id: 'PAY-003',
-      amount: { value: 100, currency: 'BRL' },
-      debtor: { account_id: 'origem' },
-      creditor: { account_id: 'destino' },
-      alias: { type: 'PIX_KEY', value: 'destino' },
-      purpose: 'A'.repeat(50),
-      reference: 'B'.repeat(200),
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '55566677788' },
+      alias: { type: 'CPF', value: '55566677788' },
       origin: { rail: 'PIX' },
       destination: { rail: 'PIX' },
     };
 
     const result = canonicalToPixPayload(canonical);
 
-    expect(result.finalidade).toHaveLength(35);
-    expect(result.mensagem).toHaveLength(140);
+    expect(result.valor.original).toBe('500.00');
+    expect(result.tipo).toBe('TRANSF');
+  });
+
+  it('should infer PIX key type from key format', () => {
+    // Test CPF key
+    const cpfCanonical = {
+      payment_id: 'PMT-003a',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '55566677788' },
+      alias: { type: 'CPF', value: '55566677788' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+    expect(canonicalToPixPayload(cpfCanonical).tipoChave).toBe('CPF');
+
+    // Test CNPJ key
+    const cnpjCanonical = {
+      payment_id: 'PMT-003b',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '12345678901234' },
+      alias: { type: 'CNPJ', value: '12345678901234' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+    expect(canonicalToPixPayload(cnpjCanonical).tipoChave).toBe('CNPJ');
+
+    // Test PHONE key
+    const phoneCanonical = {
+      payment_id: 'PMT-003c',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '+5511999999999' },
+      alias: { type: 'PHONE', value: '+5511999999999' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+    expect(canonicalToPixPayload(phoneCanonical).tipoChave).toBe('PHONE');
+
+    // Test EMAIL key
+    const emailCanonical = {
+      payment_id: 'PMT-003d',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: 'user@example.com' },
+      alias: { type: 'EMAIL', value: 'user@example.com' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+    expect(canonicalToPixPayload(emailCanonical).tipoChave).toBe('EMAIL');
+  });
+
+  it('should truncate campo livre to 140 chars max', () => {
+    const canonical = {
+      payment_id: 'PMT-004',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '55566677788' },
+      alias: { type: 'CPF', value: '55566677788' },
+      remittanceInfo: 'A'.repeat(200),
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.campoLivre).toHaveLength(140);
   });
 
   it('should strip PIX- prefix from debtor and creditor accounts', () => {
     const canonical = {
-      payment_id: 'PAY-004',
+      payment_id: 'PMT-005',
       amount: { value: 200, currency: 'BRL' },
-      debtor: { account_id: 'PIX-sender-key-123', name: 'Sender' },
-      creditor: { account_id: 'PIX-receiver-key-456', name: 'Receiver' },
-      alias: { type: 'PIX_KEY', value: 'receiver-key-456' },
+      debtor: { account_id: 'PIX-11122233344', name: 'Sender' },
+      creditor: { account_id: 'PIX-55566677788', name: 'Receiver' },
+      alias: { type: 'CPF', value: '55566677788' },
       origin: { rail: 'PIX' },
       destination: { rail: 'PIX' },
     };
 
     const result = canonicalToPixPayload(canonical);
 
-    expect(result.chaveOrigem).toBe('sender-key-123');
-    expect(result.chaveDestino).toBe('receiver-key-456');
+    // Account numbers should be stripped of PIX- prefix
+    expect(result.pagador.contaTransacional.numero).toContain('11122233344');
+    expect(result.chave).toBe('55566677788');
   });
 
   it('should handle missing optional fields gracefully', () => {
     const canonical = {
-      payment_id: 'PAY-005',
+      payment_id: 'PMT-006',
       amount: { value: 50, currency: 'BRL' },
       debtor: { account_id: 'sender' },
       creditor: { account_id: 'receiver' },
-      alias: { type: 'PIX_KEY', value: 'receiver' },
+      alias: { type: 'EVP', value: 'receiver' },
       origin: { rail: 'PIX' },
       destination: { rail: 'PIX' },
     };
 
     const result = canonicalToPixPayload(canonical);
 
-    expect(result.nomePagador).toBeUndefined();
-    expect(result.nomeRecebedor).toBeUndefined();
-    expect(result.finalidade).toBeUndefined();
-    expect(result.mensagem).toBeUndefined();
-    expect(result.trace).toBeUndefined();
+    // Optional tax ID fields should not be present
+    expect(result.pagador.cpf).toBeUndefined();
+    expect(result.pagador.cnpj).toBeUndefined();
+    expect(result.recebedor.cpf).toBeUndefined();
+    expect(result.recebedor.cnpj).toBeUndefined();
+    // But names should have defaults
+    expect(result.pagador.nome).toBe('Ordenante MIPIT');
+    expect(result.recebedor.nome).toBe('Beneficiário MIPIT');
   });
 
-  it('should round FX amount to 2 decimal places', () => {
+  it('should build identity from taxId when provided', () => {
+    const withCpf = {
+      payment_id: 'PMT-007a',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344', taxId: '12345678901' },
+      creditor: { account_id: '55566677788', taxId: '98765432109876' },
+      alias: { type: 'CPF', value: '55566677788' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(withCpf);
+
+    expect(result.pagador.cpf).toBe('12345678901');
+    expect(result.recebedor.cnpj).toBe('98765432109876');
+  });
+
+  it('should include additional info when creditor email is present', () => {
     const canonical = {
-      payment_id: 'PAY-006',
+      payment_id: 'PMT-008',
+      amount: { value: 100, currency: 'BRL' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '55566677788', email: 'recipient@example.com' },
+      alias: { type: 'CPF', value: '55566677788' },
+      origin: { rail: 'PIX' },
+      destination: { rail: 'PIX' },
+    };
+
+    const result = canonicalToPixPayload(canonical);
+
+    expect(result.infoAdicional).toBeDefined();
+    expect(result.infoAdicional![0].nome).toBe('email');
+    expect(result.infoAdicional![0].valor).toBe('recipient@example.com');
+  });
+
+  it('should handle FX conversion with proper decimal rounding', () => {
+    const canonical = {
+      payment_id: 'PMT-009',
       amount: { value: 33.33, currency: 'USD' },
       fx: { rate: 5.123 },
-      debtor: { account_id: 'sender' },
-      creditor: { account_id: 'receiver' },
-      alias: { type: 'PIX_KEY', value: 'receiver' },
+      debtor: { account_id: '11122233344' },
+      creditor: { account_id: '55566677788' },
+      alias: { type: 'CPF', value: '55566677788' },
       origin: { rail: 'PIX' },
       destination: { rail: 'PIX' },
     };
 
     const result = canonicalToPixPayload(canonical);
 
-    expect(result.valor).toBe(Math.round(33.33 * 5.123 * 100) / 100);
-  });
-
-  it('should always set moeda to BRL', () => {
-    const canonical = {
-      payment_id: 'PAY-007',
-      amount: { value: 100, currency: 'USD' },
-      debtor: { account_id: 'sender' },
-      creditor: { account_id: 'receiver' },
-      alias: { type: 'PIX_KEY', value: 'receiver' },
-      origin: { rail: 'PIX' },
-      destination: { rail: 'PIX' },
-    };
-
-    const result = canonicalToPixPayload(canonical);
-
-    expect(result.moeda).toBe('BRL');
+    const expected = (Math.round(33.33 * 5.123 * 100) / 100).toFixed(2);
+    expect(result.valor.original).toBe(expected);
   });
 });
+
