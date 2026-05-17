@@ -176,13 +176,46 @@ export const PIX_ISPB = {
 } as const;
 
 /**
- * Generates a valid PIX EndToEndId.
- * Format: E + ISPB(8) + YYYYMMDD(8) + HHmm(4) + unique(11) = 32 chars
+ * P02 — Generate a valid PIX EndToEndId per BCB Manual de Padrões para
+ * Iniciação do Pix v2.9.0.
+ *
+ * Format: E + ISPB(8 digits) + YYYYMMDDHHMM (12 chars, Brasília time UTC-3)
+ *         + 11 alphanumeric chars = 32 chars total.
+ *
+ * Notes:
+ *   - Timestamp is **Brasília time (UTC-3, no DST since 2019)**, NOT UTC.
+ *     The previous implementation used `toISOString().slice(...)` which is
+ *     UTC and would emit the wrong date near midnight BRT.
+ *   - 11-char suffix uses `crypto.randomBytes` (CSPRNG), not `Math.random`,
+ *     to avoid collisions at high throughput.
  */
-export function generatePixEndToEndId(ispb: string = PIX_ISPB.MIPIT_SIMULATED): string {
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10).replace(/-/g, '');  // YYYYMMDD
-  const time = now.toISOString().slice(11, 16).replace(':', '');   // HHmm
-  const unique = Math.random().toString(36).substring(2, 13).toUpperCase().padEnd(11, '0');
-  return `E${ispb}${date}${time}${unique}`;
+import { randomBytes } from 'node:crypto';
+
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+export function generatePixEndToEndId(
+  ispb: string = PIX_ISPB.MIPIT_SIMULATED,
+  now: Date = new Date(),
+): string {
+  const ispbPadded = ispb.padStart(8, '0');
+  if (!/^\d{8}$/.test(ispbPadded)) {
+    throw new Error(`Invalid ISPB (must be 8 digits): ${ispb}`);
+  }
+
+  // Brasília time = UTC-3, no DST since 2019.
+  const brt = new Date(now.getTime() - 3 * 3600 * 1000);
+  const yyyy = brt.getUTCFullYear();
+  const mm = String(brt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(brt.getUTCDate()).padStart(2, '0');
+  const hh = String(brt.getUTCHours()).padStart(2, '0');
+  const mi = String(brt.getUTCMinutes()).padStart(2, '0');
+  const timestamp = `${yyyy}${mm}${dd}${hh}${mi}`; // 12 chars
+
+  const bytes = randomBytes(11);
+  let suffix = '';
+  for (let i = 0; i < 11; i++) suffix += ALNUM[bytes[i] % ALNUM.length];
+
+  const id = `E${ispbPadded}${timestamp}${suffix}`;
+  if (id.length !== 32) throw new Error(`EndToEndId length ${id.length} != 32`);
+  return id;
 }

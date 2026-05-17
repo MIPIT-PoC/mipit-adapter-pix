@@ -3,8 +3,14 @@ import { PIX_ISPB, generatePixEndToEndId } from './types.js';
 
 interface CanonicalPacs008 {
   payment_id: string;
+  /** P02: preserved completion timestamp (BACEN `horario`). */
+  created_at?: string;
+  grpHdr?: { msgId?: string; creDtTm?: string; nbOfTxs?: number };
+  pmtId?: { endToEndId?: string; uetr?: string; txId?: string };
   amount: { value: number; currency: string };
   fx?: { source_currency?: string; rate?: number };
+  chrgBr?: 'DEBT' | 'CRED' | 'SHAR' | 'SLEV';
+  intrBkSttlmDt?: string;
   debtor: {
     account_id: string;
     name?: string;
@@ -90,7 +96,10 @@ export function canonicalToPixPayload(canonical: CanonicalPacs008): PixSpiPaymen
     // Reconciliation ID from payment_id (strip PMT- prefix, max 35 chars)
     idConciliacao: canonical.payment_id.replace('PMT-', '').substring(0, 35),
 
-    dataHora: new Date().toISOString(),
+    // P02 — preserve canonical creation time if present; otherwise use current
+    // time. This keeps the BACEN-mandated `horario` round-tripping through the
+    // canonical layer.
+    dataHora: canonical.grpHdr?.creDtTm ?? canonical.created_at ?? new Date().toISOString(),
   };
 
   // Add additional info if email is present

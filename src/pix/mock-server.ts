@@ -1,23 +1,32 @@
 /**
  * PIX SPI Mock Server
  *
- * Simulates the BACEN SPI sandbox endpoint for PoC testing.
- * Implements proper PIX SPI response format per BACEN specification:
- *   POST /spi/v2/pagamentos → PixSpiPaymentResponse
+ * NOTE (PoC limitation): The endpoint `POST /spi/v2/pagamentos` is **invented**.
+ * The real BCB PIX architecture exposes:
+ *   - `/v2/cob{txid}`, `/v2/cobv/{txid}`, `/v2/pix/{e2eid}` (PSP-side, REST +
+ *     OAuth2 client_credentials + mTLS with ICP-Brasil certificate).
+ *   - SPI itself (Sistema de Pagamentos Instantâneos) is XML messages over
+ *     RSFN (Rede do Sistema Financeiro Nacional), not a public REST API.
  *
- * Simulated behaviors per BACEN SPI spec (BCB Resolution no 1/2020):
- *   - EndToEndId deduplication (returns same response on duplicate)
- *   - Full BACEN SPI error code set (AB03, AC01, AM01, AM04, BE01, DS04, MD06, RR01, RR04)
- *   - PIX key (chave) format validation per DICT spec:
- *       CPF:   \d{11}
- *       CNPJ:  \d{14}
- *       PHONE: \+55\d{10,11}
- *       EMAIL: RFC 5321
- *       EVP:   UUID v4
- *   - SPI operating hours: M–F 07:00–23:59 BRT, Sat 07:00–18:00 BRT (AB03 outside)
- *   - PIX Noturno limit: BRL 1,000 between 20:00–06:59 (AM04)
- *   - Amount: 2-decimal string, > 0, max BRL 999,999,999.99
- *   - Realistic SPI latency (80–450ms)
+ * This mock provides a stylized "SPI settlement" REST API for academic interop
+ * demonstration. The shapes (field names, EndToEndId format, chave types,
+ * BACEN error codes) follow BCB Manual de Padrões para Iniciação do Pix v2.9.0
+ * to the extent possible.
+ *
+ * Implementation details (post P02):
+ *   - EndToEndId per BCB format: E + ISPB(8) + YYYYMMDDHHMM(BRT) + 11 alnum.
+ *   - PIX is 24/7/365 (BACEN Resolução 1/2020 art. 24); ENFORCE_HOURS=false default.
+ *   - Idempotency via in-memory map keyed by EndToEndId.
+ *   - Full BACEN code set (AB03, AC01, AM01, AM04, BE01, DS04, MD06, RR01, RR04).
+ *   - DICT chave validation: CPF/CNPJ mod-11 checksum (not just regex), phone
+ *     +55 E.164, email RFC 5321-light, EVP UUIDv4 with variant/version bits.
+ *   - `tipo` enum extended with DEVOL (devolução) and DEPOSIT (PIX Saque/Troco).
+ *
+ * Known limitations (documented in mipit-docs/LIMITATIONS.md):
+ *   - No mTLS (ICP-Brasil cert) — OAuth2 Bearer only.
+ *   - No DICT consultation (`GET /v2/dict/{key}`) — chave→account is fake.
+ *   - No BR Code (`pixCopiaECola`) — out of SPI settlement scope.
+ *   - No devoluções endpoint (`/v2/pix/{e2eid}/devolucao`).
  */
 
 import express from 'express';
@@ -28,6 +37,7 @@ import type { PixSpiPaymentRequest, PixSpiPaymentResponse } from './types.js';
 import { PIX_ISPB } from './types.js';
 import { registerOAuth2Routes, oauthMiddleware } from './oauth-mock.js';
 import { registerAdminRoutes, mockConfig, mockStats } from './admin-routes.js';
+import { isValidCPF, isValidCNPJ } from './cpf-cnpj-validator.js';
 
 const app = express();
 app.use((_req, res, next) => {
@@ -63,22 +73,14 @@ const CHAVE_VALIDATORS: Record<string, RegExp> = {
 };
 
 /**
- * Returns true if the current BRT time is inside BACEN SPI operating window.
- * SPI window (BRT = UTC-3):
- *   Monday–Friday: 07:00–23:59
- *   Saturday:      07:00–17:59
- *   Sunday:        closed
+ * P02 — PIX SPI is 24/7/365 by BACEN regulation (Resolução 1/2020 art. 24).
+ * Previous implementation enforced M-F + Saturday windows which were copied
+ * from the legacy STR (Sistema de Transferência de Reservas) settlement
+ * window, not SPI. Returning true always; left ENFORCE_HOURS as a knob for
+ * tests that need closed-window simulation.
  */
 function isSpiWindowOpen(): boolean {
-  const brt = new Date(Date.now() - 3 * 60 * 60 * 1000); // UTC-3
-  const day  = brt.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-  const hour = brt.getUTCHours();
-  const min  = brt.getUTCMinutes();
-  const hhmm = hour * 100 + min;
-
-  if (day === 0) return false;            // Sunday: closed
-  if (day === 6) return hhmm >= 700 && hhmm <= 1759; // Saturday
-  return hhmm >= 700;                     // Mon–Fri: 07:00–23:59
+  return true; // SPI is 24/7/365
 }
 
 /**
@@ -106,8 +108,9 @@ app.post('/spi/v2/pagamentos', (req, res) => {
   }
 
   // === Validation: EndToEndId format ===
-  // Format: E + ISPB(8) + YYYYMMDD(8) + HHmm(4) + 11 unique chars = 32 chars total
-  if (!endToEndId || !/^E\d{8}\d{8}\d{4}[A-Z0-9]{11}$/.test(endToEndId)) {
+  // P02 — BCB Manual de Padrões: E + ISPB(8) + YYYYMMDDHHMM(12, BRT) +
+  // 11 alphanumeric (case-insensitive per spec) = 32 chars total.
+  if (!endToEndId || !/^E\d{8}\d{12}[A-Za-z0-9]{11}$/.test(endToEndId)) {
     logger.warn({ endToEndId }, 'PIX mock: invalid EndToEndId format');
     return res.status(400).json({
       title: 'Parâmetro inválido.',
@@ -158,13 +161,28 @@ app.post('/spi/v2/pagamentos', (req, res) => {
       processedPayments.set(endToEndId, r);
       return res.status(200).json(r);
     }
+
+    // P02 — CPF/CNPJ mod-11 checksum (not just regex). DICT rejects bogus IDs.
+    if (tipoChave === 'CPF' && !isValidCPF(chave)) {
+      const r = buildRejectedResponse(endToEndId, valor.original, 'AC03',
+        `CPF '${chave}' falhou validação de dígito verificador (mod-11).`);
+      processedPayments.set(endToEndId, r);
+      return res.status(200).json(r);
+    }
+    if (tipoChave === 'CNPJ' && !isValidCNPJ(chave)) {
+      const r = buildRejectedResponse(endToEndId, valor.original, 'AC03',
+        `CNPJ '${chave}' falhou validação de dígito verificador (mod-11).`);
+      processedPayments.set(endToEndId, r);
+      return res.status(200).json(r);
+    }
   }
 
   // === Validation: Payment type ===
-  if (tipo && !['TRANSF', 'COBR', 'DBOL'].includes(tipo)) {
+  // P02 — extended enum to include DEVOL (devolução) per BACEN catalog
+  if (tipo && !['TRANSF', 'COBR', 'DBOL', 'DEVOL'].includes(tipo)) {
     return res.status(400).json({
       title: 'Parâmetro inválido.',
-      detail: `Tipo de pagamento inválido: ${tipo}. Valores aceitos: TRANSF, COBR, DBOL.`,
+      detail: `Tipo de pagamento inválido: ${tipo}. Valores aceitos: TRANSF, COBR, DBOL, DEVOL.`,
       violacoes: [{ razao: 'Valor não permitido.', valor: 'tipo' }],
     });
   }
