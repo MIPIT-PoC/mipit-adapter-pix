@@ -6,6 +6,13 @@ jest.mock('../../src/observability/metrics', () => ({
   pixPaymentsTotal: { inc: jest.fn() },
   pixPaymentLatency: { observe: jest.fn() },
   pixRetryCount: { inc: jest.fn() },
+  // P07 — unified adapter metrics + helper. Tests mock the helper because
+  // it just funnels into the per-rail counters internally.
+  adapterRequestsTotal: { inc: jest.fn() },
+  adapterLatencyMs: { observe: jest.fn() },
+  adapterRetriesTotal: { inc: jest.fn() },
+  adapterErrorsTotal: { inc: jest.fn() },
+  recordAdapterRequest: jest.fn(),
 }));
 
 jest.mock('../../src/config/env', () => ({

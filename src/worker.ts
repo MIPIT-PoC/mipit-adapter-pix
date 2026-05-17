@@ -6,7 +6,7 @@ import { pixResponseToAck } from './pix/response-mapper.js';
 import { sendPixPayment } from './pix/client.js';
 import { publishAck } from './messaging/publisher.js';
 import { logger } from './observability/logger.js';
-import { pixPaymentsTotal, pixPaymentLatency } from './observability/metrics.js';
+import { pixPaymentsTotal, pixPaymentLatency, recordAdapterRequest } from './observability/metrics.js';
 
 export interface PaymentRouteMessage {
   payment_id: string;
@@ -76,8 +76,11 @@ export async function startWorker(channel: Channel) {
 
       publishAck(channel, ackMessage);
 
-      pixPaymentsTotal.inc({ status: railAck.status === 'ACCEPTED' ? 'success' : 'rejected' });
+      // P07: unified `mipit_adapter_*` metrics + legacy per-rail names
+      const outcome = railAck.status === 'ACCEPTED' ? 'success' : 'rejected';
+      pixPaymentsTotal.inc({ status: outcome });
       pixPaymentLatency.observe({ status: 'success' }, latencyMs);
+      recordAdapterRequest(outcome, latencyMs, railAck.error?.code);
 
       logger.info({
         payment_id: routeMsg.payment_id,
@@ -109,6 +112,7 @@ export async function startWorker(channel: Channel) {
 
       pixPaymentsTotal.inc({ status: 'error' });
       pixPaymentLatency.observe({ status: 'error' }, latencyMs);
+      recordAdapterRequest('error', latencyMs, 'WORKER_ERROR');
 
       channel.nack(msg, false, false);
     }
