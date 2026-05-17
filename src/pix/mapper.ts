@@ -41,8 +41,14 @@ interface CanonicalPacs008 {
  * and builds payer/receiver structures with ISPB codes.
  */
 export function canonicalToPixPayload(canonical: CanonicalPacs008): PixSpiPaymentRequest {
-  const fxRate = canonical.fx?.rate ?? 1;
-  const localAmount = canonical.amount.value * fxRate;
+  // P05 — Prefer canonical.fx.local_amount when populated by the normalizer
+  // (the source-of-truth post-FX amount in the destination rail's currency).
+  // Fall back to amount.value * rate (legacy path) and finally to amount.value
+  // when no FX was needed (same-currency transfer).
+  const localAmount =
+    (canonical.fx as { local_amount?: number } | undefined)?.local_amount
+    ?? canonical.amount.value * (canonical.fx?.rate ?? 1);
+  // PIX is BRL — 2 decimals.
   const amountStr = (Math.round(localAmount * 100) / 100).toFixed(2);
 
   // Strip PIX- prefix from account IDs to get the raw key/account
